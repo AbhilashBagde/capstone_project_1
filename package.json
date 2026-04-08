@@ -1,0 +1,20 @@
+{
+  "name": "cah-reh-calculator",
+  "version": "1.0.0",
+  "description": "CAH → REH Conversion Financial Calculator",
+  "private": true,
+  "scripts": {
+    "dev": "npx http-server -p 3000 -c-1",
+    "build": "echo 'No build needed for static site'",
+    "start": "npx http-server -p 3000"
+  },
+  "keywords": [
+    "calculator",
+    "financial",
+    "healthcare",
+    "CAH",
+    "REH"
+  ],
+  "author": "",
+  "license": "MIT"
+}
