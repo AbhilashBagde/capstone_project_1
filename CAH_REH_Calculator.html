@@ -356,6 +356,28 @@ function computeProjection(hosp, assumptions, year) {
   const histMargin    = npr > 0 ? histOpIncome / npr : null;
   const marginImprove = projMargin != null && histMargin != null ? projMargin - histMargin : null;
 
+  // State supplement losses (state-conditional; evaluate to 0 when state does not match)
+  const dshLoss      = assumptions.dshAnnualLoss || 0;
+  const lincLoss     = hosp.State === 'LA' ? (assumptions.laLincLoss || 0) : 0;
+  const ucPoolLoss   = hosp.State === 'TX' ? ipCostShare * (assumptions.txUcPoolHistorical || 0) : 0;
+  const chirpIPLoss  = hosp.State === 'TX' ? ipCostShare * (assumptions.txChirpHistorical || 0) : 0;
+  const totalSuppLoss = dshLoss + lincLoss + ucPoolLoss + chirpIPLoss;
+
+  // Grant upside (probability-weighted; default 0 via assumptions)
+  const rhtpEligible = ['TX','AR','OK','NM'].includes(hosp.State);
+  const rhtpGrant    = rhtpEligible
+    ? (assumptions.rhtpProbability || 0) / 100 * (assumptions.rhtpAwardAmt || 0) : 0;
+  const nmRhcdfGrant = hosp.State === 'NM'
+    ? (assumptions.nmRhcdfProbability || 0) / 100 * (assumptions.nmRhcdfAwardAmt || 640000) : 0;
+  const totalGrantUpside = rhtpGrant + nmRhcdfGrant;
+
+  // Adjusted track
+  const totalRevenueAdj  = totalRevenue - totalSuppLoss + totalGrantUpside;
+  const projNetIncomeAdj = totalRevenueAdj - totalExpenses;
+  const projMarginAdj    = totalRevenueAdj > 0 ? projNetIncomeAdj / totalRevenueAdj : null;
+  const marginImproveAdj = projMarginAdj != null && histMargin != null
+    ? projMarginAdj - histMargin : null;
+
   return {
     year, afpAnnual, opRev, ipRev, oppsBump, penalty340B,
     otherInc, totalRevenue,
@@ -363,6 +385,12 @@ function computeProjection(hosp, assumptions, year) {
     totalExpenses, swingBedNetLoss,
     projNetIncome, histOpIncome, histTotal, projMargin, histMargin, marginImprove,
     ipRevLost: ipRev,  // memo: inpatient revenue no longer collected
+    // State supplement losses
+    dshLoss, lincLoss, ucPoolLoss, chirpIPLoss, totalSuppLoss,
+    // Grant upside
+    rhtpGrant, nmRhcdfGrant, totalGrantUpside, rhtpEligible,
+    // Adjusted track
+    totalRevenueAdj, projNetIncomeAdj, projMarginAdj, marginImproveAdj,
   };
 }
 
@@ -371,6 +399,14 @@ function classifyViability(proj) {
   if (proj.projNetIncome > 0 && proj.marginImprove >= 0.05) return 'Strong Convert';
   if (proj.projNetIncome > 0) return 'Viable Convert';
   if (proj.marginImprove > 0) return 'Marginal';
+  return 'Not Viable';
+}
+
+function classifyViabilityAdj(proj) {
+  if (!proj) return 'Insufficient Data';
+  if (proj.projNetIncomeAdj > 0 && proj.marginImproveAdj >= 0.05) return 'Strong Convert';
+  if (proj.projNetIncomeAdj > 0) return 'Viable Convert';
+  if (proj.marginImproveAdj > 0) return 'Marginal';
   return 'Not Viable';
 }
 
@@ -386,7 +422,7 @@ function ViabilityBadge({ v }) {
   const cfg = {
     'Strong Convert':     ['bg-green-600 text-white',   'Strong Convert'],
     'Viable Convert':     ['bg-emerald-400 text-white',  'Viable Convert'],
-    'Marginal':           ['bg-amber-400 text-white',    'Marginal'],
+    'Marginal':           ['bg-amber-400 text-amber-900',    'Marginal'],
     'Not Viable':         ['bg-red-600 text-white',      'Not Viable'],
     'Insufficient Data':  ['bg-gray-300 text-gray-600',  'Insufficient Data'],
   };
@@ -520,25 +556,34 @@ function BarChart({ proj, hosp }) {
 function WaterfallChart({ proj }) {
   const canvasRef = useRef(null);
   const chartRef  = useRef(null);
+  const [waterfallTrack, setWaterfallTrack] = useState('federal');
 
   useEffect(() => {
     if (!canvasRef.current || !proj) return;
     if (chartRef.current) chartRef.current.destroy();
 
-    // Waterfall walks from Historical Op Income to Projected Net Income.
-    // IP Revenue Lost is implicit (proj revenue = OP_Rev only); Swing Bed Cost Saved is in
-    // totalSavings+swingBedCostSaved; net swing bed effect = swingBedCostSaved - ipRevLost(swing portion)
-    // We show: start + other income + AFP + OPPS + cost savings - IP revenue lost - 340B penalty
+    const isAdj = waterfallTrack === 'adjusted';
+    const finalIncome = isAdj ? proj.projNetIncomeAdj : proj.projNetIncome;
+    const finalLabel  = isAdj ? 'Adj Net\nIncome' : 'Proj Net\nIncome';
+
     const steps = [
-      { label: 'Hist Op\nIncome',    value: proj.histOpIncome,          color: proj.histOpIncome >= 0 ? '#0D7377' : '#DC2626' },
-      { label: '+ Other\nIncome',    value: proj.otherInc,               color: '#059669' },
-      { label: '+ AFP',              value: proj.afpAnnual,              color: '#059669' },
-      { label: '+ OPPS\nBump',       value: proj.oppsBump,               color: '#059669' },
+      { label: 'Hist Op\nIncome',    value: proj.histOpIncome,                        color: proj.histOpIncome >= 0 ? '#0D7377' : '#DC2626' },
+      { label: '+ Other\nIncome',    value: proj.otherInc,                             color: '#059669' },
+      { label: '+ AFP',              value: proj.afpAnnual,                            color: '#059669' },
+      { label: '+ OPPS\nBump',       value: proj.oppsBump,                             color: '#059669' },
       { label: '+ Cost\nSavings',    value: proj.totalSavings + proj.swingBedCostSaved, color: '#059669' },
-      { label: '− IP Rev\nLost',     value: -proj.ipRevLost,             color: '#DC2626' },
-      { label: '− 340B\nPenalty',    value: -proj.penalty340B,           color: proj.penalty340B > 0 ? '#DC2626' : '#94a3b8' },
-      { label: 'Proj Net\nIncome',   value: proj.projNetIncome,          color: proj.projNetIncome >= 0 ? '#059669' : '#DC2626', final: true },
+      { label: '- IP Rev\nLost',     value: -proj.ipRevLost,                           color: '#DC2626' },
+      { label: '- 340B\nPenalty',    value: -proj.penalty340B,                         color: proj.penalty340B > 0 ? '#DC2626' : '#94a3b8' },
     ];
+
+    if (isAdj && proj.totalSuppLoss > 0) {
+      steps.push({ label: '- Supp\nLosses', value: -proj.totalSuppLoss, color: '#DC2626' });
+    }
+    if (isAdj && proj.totalGrantUpside > 0) {
+      steps.push({ label: '+ Grant\nUpside', value: proj.totalGrantUpside, color: '#059669' });
+    }
+
+    steps.push({ label: finalLabel, value: finalIncome, color: finalIncome >= 0 ? '#059669' : '#DC2626', final: true });
 
     // Build floating bars [low, high] per segment
     let running = 0;
@@ -571,7 +616,7 @@ function WaterfallChart({ proj }) {
               }
             }
           },
-          title: { display: true, text: 'Waterfall: Historical → Projected Net Income', font: { size: 13, weight: 'bold' }, color: '#1B2A4A' }
+          title: { display: true, text: 'Waterfall: Historical to Projected Net Income', font: { size: 13, weight: 'bold' }, color: '#1B2A4A' }
         },
         scales: {
           x: { grid: { display: false }, ticks: { font: { size: 10 } } },
@@ -583,11 +628,19 @@ function WaterfallChart({ proj }) {
       }
     });
     return () => { if (chartRef.current) chartRef.current.destroy(); };
-  }, [proj]);
+  }, [proj, waterfallTrack]);
 
   return (
-    <div className="chart-container" style={{height:280}}>
-      <canvas ref={canvasRef}/>
+    <div>
+      <div className="flex justify-end gap-1 mb-1">
+        <button className={`toggle-btn ${waterfallTrack==='federal'?'active':'inactive'}`}
+          onClick={()=>setWaterfallTrack('federal')}>Federal</button>
+        <button className={`toggle-btn ${waterfallTrack==='adjusted'?'active':'inactive'}`}
+          onClick={()=>setWaterfallTrack('adjusted')}>Adjusted</button>
+      </div>
+      <div className="chart-container" style={{height:280}}>
+        <canvas ref={canvasRef}/>
+      </div>
     </div>
   );
 }
@@ -635,8 +688,48 @@ function ProjectionTable({ years, assumptions, hosp }) {
           <Row label="Non-COVID Other Income" vals={projections.map(p=>p.otherInc)} indent/>
           <Row label="340B Penalty" vals={projections.map(p=>-p.penalty340B)} indent color="text-red-600"/>
           <tr className="total-row">
-            <td className="font-bold">Total Projected Revenue</td>
+            <td className="font-bold">Total Projected Revenue (Federal)</td>
             {projections.map(p=><td key={p.year} className="font-bold text-green-700">{fmt(p.totalRevenue)}</td>)}
+          </tr>
+
+          <tr className="section-label"><td colSpan={projections.length+1}>STATE SUPPLEMENTS &amp; GRANTS</td></tr>
+          <Row label="DSH Annual Loss" vals={projections.map(p=>p.dshLoss > 0 ? -p.dshLoss : null)} indent color="text-red-600"/>
+          <tr>
+            <td className="pl-6 text-slate-500">LA LINCC Loss</td>
+            {projections.map(p=>(
+              <td key={p.year} className={`text-right ${hosp.State === 'LA' ? 'text-red-600' : 'text-slate-300'}`}>
+                {hosp.State === 'LA' ? fmt(-p.lincLoss) : 'N/A'}
+              </td>
+            ))}
+          </tr>
+          <tr>
+            <td className="pl-6 text-slate-500">TX UC Pool Loss</td>
+            {projections.map(p=>(
+              <td key={p.year} className={`text-right ${hosp.State === 'TX' ? 'text-red-600' : 'text-slate-300'}`}>
+                {hosp.State === 'TX' ? fmt(-p.ucPoolLoss) : 'N/A'}
+              </td>
+            ))}
+          </tr>
+          <tr>
+            <td className="pl-6 text-slate-500">TX CHIRP IP Loss</td>
+            {projections.map(p=>(
+              <td key={p.year} className={`text-right ${hosp.State === 'TX' ? 'text-red-600' : 'text-slate-300'}`}>
+                {hosp.State === 'TX' ? fmt(-p.chirpIPLoss) : 'N/A'}
+              </td>
+            ))}
+          </tr>
+          {projections[0]?.rhtpEligible && (
+            <Row label="RHTP Grant" vals={projections.map(p=>p.rhtpGrant > 0 ? p.rhtpGrant : null)} indent color="text-green-600"/>
+          )}
+          {hosp.State === 'NM' && (
+            <Row label="NM RHCDF Grant" vals={projections.map(p=>p.nmRhcdfGrant > 0 ? p.nmRhcdfGrant : null)} indent color="text-green-600"/>
+          )}
+          <tr>
+            <td className="font-bold">Total Supplement/Grant Net</td>
+            {projections.map(p=>{
+              const net = p.totalGrantUpside - p.totalSuppLoss;
+              return <td key={p.year} className={`font-bold text-right ${net >= 0 ? 'text-green-700' : 'text-red-600'}`}>{fmtSign(net)}</td>;
+            })}
           </tr>
 
           <tr className="section-label"><td colSpan={projections.length+1}>EXPENSES</td></tr>
@@ -649,9 +742,15 @@ function ProjectionTable({ years, assumptions, hosp }) {
           </tr>
 
           <tr className={`net-row border-t-2 border-slate-400`}>
-            <td className="font-bold text-base">Projected Net Income</td>
+            <td className="font-bold text-base">Projected Net Income (Federal)</td>
             {projections.map(p=><td key={p.year} className={`font-bold text-base ${p.projNetIncome>=0?'text-green-700':'text-red-600'}`}>
               {fmt(p.projNetIncome)}
+            </td>)}
+          </tr>
+          <tr style={{borderTop:'2px dashed #94a3b8'}}>
+            <td className="font-bold text-base pl-4">Projected Net Income (Adjusted)</td>
+            {projections.map(p=><td key={p.year} className={`font-bold text-base text-right ${p.projNetIncomeAdj>=0?'text-green-700':'text-red-600'}`}>
+              {fmt(p.projNetIncomeAdj)}
             </td>)}
           </tr>
           <Row label="Historical Operating Income (reference)" vals={projections.map(p=>p.histOpIncome)} indent color="text-slate-500"/>
@@ -670,27 +769,40 @@ function ProjectionTable({ years, assumptions, hosp }) {
 
 // ── Risk Flags ────────────────────────────────────────────────────────────────
 
-function RiskFlags({ hosp, assumptions }) {
+function RiskFlags({ hosp, assumptions, proj }) {
   if (!hosp) return null;
   const flags = [];
-  if ((assumptions.swingBedDays||0) > 500) flags.push(['⚠️','High Swing Bed Dependency','bg-amber-50 border-amber-200 text-amber-700',
+  if ((assumptions.swingBedDays||0) > 500) flags.push(['High Swing Bed Dependency','bg-amber-50 border-amber-200 text-amber-700',
     `${assumptions.swingBedDays} swing bed days annually. Loss of this revenue may negate conversion benefits.`]);
-  if (hosp.Is_340B_Enrolled) flags.push(['⚠️','340B Enrolled — Revenue at Risk','bg-red-50 border-red-200 text-red-700',
+  if (hosp.Is_340B_Enrolled) flags.push(['340B Enrolled — Revenue at Risk','bg-red-50 border-red-200 text-red-700',
     'REHs cannot participate in 340B. Forfeiture of drug pricing discounts may exceed labor savings for pharmacy-dependent facilities.']);
-  if ((1 - (hosp.OP_Share||0.65)) > 0.25) flags.push(['⚠️','High Inpatient Revenue Share','bg-amber-50 border-amber-200 text-amber-700',
+  if ((1 - (hosp.OP_Share||0.65)) > 0.25) flags.push(['High Inpatient Revenue Share','bg-amber-50 border-amber-200 text-amber-700',
     `${fmtPct(1-(hosp.OP_Share||0.65))} of net revenue is inpatient. Significant IP revenue loss at conversion.`]);
-  if ((hosp.Medicare_Payer_Mix_Pct||0) < 0.20) flags.push(['ℹ️','Low Medicare FFS Mix','bg-blue-50 border-blue-200 text-blue-700',
+  if ((hosp.Medicare_Payer_Mix_Pct||0) < 0.20) flags.push(['Low Medicare FFS Mix','bg-blue-50 border-blue-200 text-blue-700',
     `Medicare FFS mix is ${fmtPct(hosp.Medicare_Payer_Mix_Pct||0)}. OPPS 5% enhancement has limited impact for non-Medicare patients.`]);
+  // State supplement flags
+  if (proj && (assumptions.dshAnnualLoss||0) > 0 && assumptions.dshAnnualLoss > proj.afpAnnual * 0.5) {
+    flags.push(['DSH Loss Exceeds 50% of AFP','bg-red-50 border-red-200 text-red-700',
+      `Your entered DSH loss (${fmt(assumptions.dshAnnualLoss)}) is substantial relative to the AFP (${fmt(proj.afpAnnual)}). Verify figures before deciding.`]);
+  }
+  if (hosp.State === 'LA' && (assumptions.laLincLoss||0) === 0) {
+    flags.push(['LA LINCC Risk Unquantified','bg-amber-50 border-amber-200 text-amber-700',
+      'LINCC payments are likely forfeited post-REH. Enter actual LINCC receipts in State Supplements above.']);
+  }
+  if (hosp.State === 'AR') {
+    flags.push(['AR SPA Upside Not Modeled','bg-blue-50 border-blue-200 text-blue-700',
+      '100% Medicaid cost settlement may partially offset DSH losses. Contact Arkansas Medicaid for outpatient cost report data.']);
+  }
   if (flags.length === 0) return (
     <div className="bg-green-50 border border-green-200 rounded-lg p-3 text-sm text-green-700">
-      ✓ No major risk flags identified based on current data and assumptions.
+      No major risk flags identified based on current data and assumptions.
     </div>
   );
   return (
     <div className="space-y-2">
-      {flags.map(([icon, title, cls, desc], i) => (
+      {flags.map(([title, cls, desc], i) => (
         <div key={i} className={`border rounded-lg p-3 ${cls}`}>
-          <div className="font-semibold text-sm">{icon} {title}</div>
+          <div className="font-semibold text-sm">{title}</div>
           <div className="text-xs mt-1 opacity-80">{desc}</div>
         </div>
       ))}
@@ -827,25 +939,26 @@ function ScenarioPanel({ hosp, assumptions, convYear }) {
                 ['Projected Expenses', s=>fmt(s.totalExpenses)],
                 ['IP Cost Savings', s=>fmt(s.totalSavings)],
                 ['Staffing Savings', s=>fmt(s.staffingSavings)],
-                ['Projected Net Income', s=>fmt(s.projNetIncome), true],
+                ['Projected Net Income (Federal)', s=>fmt(s.projNetIncome), true],
+                ['Projected Net Income (Adjusted)', s=>fmt(s.projNetIncomeAdj), true],
                 ['Historical Net Income', s=>fmt(s.histOpIncome+s.otherInc)],
                 ['Margin Improvement', s=>fmtPctSign(s.marginImprove)],
-                ['Viability', s=>classifyViability(s)],
+                ['Viability (Federal)', s=>classifyViability(s)],
+                ['Viability (Adjusted)', s=>classifyViabilityAdj(s)],
               ].map(([label, getter, bold], i) => (
                 <tr key={i} className={i%2===0?'bg-slate-50':''}>
                   <td className={`p-3 ${bold?'font-bold':''}`}>{label}</td>
                   {scenarios.map(s=>{
                     const val = getter(s.proj);
                     const isMoney = label.includes('Income') || label.includes('Revenue') || label.includes('Savings') || label.includes('AFP');
+                    const viabCls = v => v === 'Strong Convert' ? 'bg-green-100 text-green-700' : v === 'Viable Convert' ? 'bg-emerald-100 text-emerald-700' : v === 'Marginal' ? 'bg-amber-100 text-amber-700' : 'bg-red-100 text-red-700';
+                    const isViab = label.startsWith('Viability');
                     return (
                       <td key={s.name} className={`p-3 text-right ${bold?'font-bold':''} ${
-                        label === 'Projected Net Income' ? (s.proj.projNetIncome>=0?'text-green-700':'text-red-600') :
+                        label === 'Projected Net Income (Federal)' ? (s.proj.projNetIncome>=0?'text-green-700':'text-red-600') :
+                        label === 'Projected Net Income (Adjusted)' ? (s.proj.projNetIncomeAdj>=0?'text-green-700':'text-red-600') :
                         label === 'Margin Improvement' ? (s.proj.marginImprove>=0?'text-green-700':'text-red-600') : ''}`}>
-                        {label === 'Viability' ? <span className={`badge ${
-                          s.proj && classifyViability(s.proj) === 'Strong Convert' ? 'bg-green-100 text-green-700' :
-                          classifyViability(s.proj) === 'Viable Convert' ? 'bg-emerald-100 text-emerald-700' :
-                          classifyViability(s.proj) === 'Marginal' ? 'bg-amber-100 text-amber-700' : 'bg-red-100 text-red-700'
-                        }`}>{val}</span> : val}
+                        {isViab ? <span className={`badge ${viabCls(val)}`}>{val}</span> : val}
                       </td>
                     );
                   })}
@@ -861,7 +974,7 @@ function ScenarioPanel({ hosp, assumptions, convYear }) {
 
 // ── PDF Generation ────────────────────────────────────────────────────────────
 
-async function generatePDF(hosp, projections, assumptions, viability, staffingRows) {
+async function generatePDF(hosp, projections, assumptions, viability, viabilityAdj, staffingRows) {
   const { jsPDF } = window.jspdf;
   const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
   const W = doc.internal.pageSize.getWidth();
@@ -897,7 +1010,7 @@ async function generatePDF(hosp, projections, assumptions, viability, staffingRo
   doc.roundedRect(margin, y, W-2*margin, 18, 3, 3, 'F');
   doc.setTextColor(255,255,255);
   doc.setFontSize(14); doc.setFont(undefined,'bold');
-  doc.text(`Viability: ${viability}`, W/2, y+11, {align:'center'});
+  doc.text(`Federal Viability: ${viability}  |  Adjusted Viability: ${viabilityAdj}`, W/2, y+11, {align:'center'});
   y += 26;
 
   // ── Hospital Profile ──
@@ -980,6 +1093,42 @@ async function generatePDF(hosp, projections, assumptions, viability, staffingRo
   }
   y += 8;
 
+  // ── State Adjustments Summary ──
+  const p0 = projections[0];
+  if (p0) {
+    checkY(50);
+    doc.setTextColor(27,42,74); doc.setFontSize(12); doc.setFont(undefined,'bold');
+    doc.text('State Adjustments Summary', margin, y); y += 6;
+    doc.setFontSize(8); doc.setFont(undefined,'normal'); doc.setTextColor(60,60,60);
+
+    const suppRows = [];
+    if ((assumptions.dshAnnualLoss||0) > 0) suppRows.push(['DSH Annual Loss', fmt(-p0.dshLoss)]);
+    if (p0.lincLoss > 0) suppRows.push(['LA LINCC Loss', fmt(-p0.lincLoss)]);
+    if (p0.ucPoolLoss > 0) suppRows.push(['TX UC Pool Loss', fmt(-p0.ucPoolLoss)]);
+    if (p0.chirpIPLoss > 0) suppRows.push(['TX CHIRP IP Loss', fmt(-p0.chirpIPLoss)]);
+    if (suppRows.length === 0) suppRows.push(['Supplement Losses', 'None entered ($0 defaults)']);
+
+    const grantRows = [];
+    if (p0.rhtpGrant > 0) grantRows.push([`RHTP Grant (${(assumptions.rhtpProbability||0)}% probability)`, fmt(p0.rhtpGrant)]);
+    if (p0.nmRhcdfGrant > 0) grantRows.push([`NM RHCDF Grant (${(assumptions.nmRhcdfProbability||0)}% probability)`, fmt(p0.nmRhcdfGrant)]);
+    if (grantRows.length === 0) grantRows.push(['Grant Upside', 'None (0% probability defaults)']);
+
+    [...suppRows, ...grantRows,
+      ['Total Supplement/Grant Net (Yr 1)', fmtSign(p0.totalGrantUpside - p0.totalSuppLoss)],
+      ['Adjusted Net Income (Yr 1)', fmt(p0.projNetIncomeAdj)],
+      ['Adjusted Viability', viabilityAdj],
+    ].forEach(([l, r], i) => {
+      checkY(7);
+      if (i%2===0) { doc.setFillColor(248,250,252); doc.rect(margin, y, W-2*margin, 6, 'F'); }
+      const isBold = l.startsWith('Total') || l.startsWith('Adjusted');
+      if (isBold) doc.setFont(undefined,'bold'); else doc.setFont(undefined,'normal');
+      doc.text(l, margin+2, y+4.5);
+      doc.text(r, W-margin-2, y+4.5, {align:'right'});
+      y += 6;
+    });
+    y += 6;
+  }
+
   // ── Assumptions Used ──
   checkY(60);
   doc.setTextColor(27,42,74); doc.setFontSize(12); doc.setFont(undefined,'bold');
@@ -1047,6 +1196,18 @@ function App() {
   const [nonLaborVarPct,    setNonLaborVarPct]    = useState(15);
   const [staffingRows,      setStaffingRows]      = useState(DEFAULT_STAFFING);
 
+  // State supplement losses — all default 0
+  const [dshAnnualLoss,       setDshAnnualLoss]       = useState(0);
+  const [laLincLoss,          setLaLincLoss]           = useState(0);
+  const [txUcPoolHistorical,  setTxUcPoolHistorical]   = useState(0);
+  const [txChirpHistorical,   setTxChirpHistorical]    = useState(0);
+
+  // Grant upside — probability % and award $
+  const [rhtpProbability,     setRhtpProbability]      = useState(0);
+  const [rhtpAwardAmt,        setRhtpAwardAmt]         = useState(0);
+  const [nmRhcdfProbability,  setNmRhcdfProbability]   = useState(0);
+  const [nmRhcdfAwardAmt,     setNmRhcdfAwardAmt]      = useState(640000);
+
   // Fetch data on mount
   useEffect(() => {
     fetch(DATA_URL)
@@ -1106,9 +1267,15 @@ function App() {
     staffingRows, costModel,
     nonLaborVarCostPct: nonLaborVarPct / 100,
     conversionYear,
+    // State supplement losses
+    dshAnnualLoss, laLincLoss, txUcPoolHistorical, txChirpHistorical,
+    // Grant upside
+    rhtpProbability, rhtpAwardAmt, nmRhcdfProbability, nmRhcdfAwardAmt,
   }), [afpMonthly2025, afpMonthly2026, afpGrowthRate, oppsPremiumPct, b340bPenaltyPct,
        marginalIPCostPct, benefitsMultiplier, swingBedDays, swingBedRevPerDay, swingBedMargCost,
-       staffingRows, costModel, nonLaborVarPct, conversionYear]);
+       staffingRows, costModel, nonLaborVarPct, conversionYear,
+       dshAnnualLoss, laLincLoss, txUcPoolHistorical, txChirpHistorical,
+       rhtpProbability, rhtpAwardAmt, nmRhcdfProbability, nmRhcdfAwardAmt]);
 
   const projYearList = useMemo(() => {
     return Array.from({length: projYears}, (_, i) => conversionYear + i);
@@ -1118,7 +1285,8 @@ function App() {
     selectedHosp ? computeProjection(selectedHosp, assumptions, conversionYear) : null,
   [selectedHosp, assumptions, conversionYear]);
 
-  const viability = useMemo(() => classifyViability(primaryProj), [primaryProj]);
+  const viability    = useMemo(() => classifyViability(primaryProj),    [primaryProj]);
+  const viabilityAdj = useMemo(() => classifyViabilityAdj(primaryProj), [primaryProj]);
   const allProjections = useMemo(() =>
     projYearList.map(y => computeProjection(selectedHosp, assumptions, y)).filter(Boolean),
   [selectedHosp, assumptions, projYearList]);
@@ -1161,7 +1329,7 @@ function App() {
           </div>
           {error && (
             <div className="mt-2 bg-amber-900/50 border border-amber-700 rounded p-2 text-amber-200 text-xs">
-              ⚠️ Could not fetch data from GitHub: {error}. Upload SST.v3.csv manually above.
+              Could not fetch data from GitHub: {error}. Upload SST.v3.csv manually above.
             </div>
           )}
         </div>
@@ -1170,7 +1338,7 @@ function App() {
       <div className="max-w-screen-xl mx-auto px-4 py-4">
         {/* ── Hospital Selection ── */}
         <div className="section-card no-print">
-          <div className="section-header">🏥 Hospital Selection</div>
+          <div className="section-header">Hospital Selection</div>
           <div className="section-body">
             <div className="grid grid-cols-12 gap-4 items-end">
               <div className="col-span-2">
@@ -1187,7 +1355,7 @@ function App() {
                     className="mb-1"/>
                   <select size={1} value={selectedCCN} onChange={e=>{setSelectedCCN(e.target.value);setSearchTerm('');}}
                     className="h-9">
-                    <option value="">— Select a hospital —</option>
+                    <option value="">Select a hospital —</option>
                     {filteredHospitals.map(h=>(
                       <option key={h.Unified_CCN} value={h.Unified_CCN}>
                         {h.Hospital_Name} ({h.Unified_CCN}) — {h.State}
@@ -1220,7 +1388,6 @@ function App() {
 
         {!selectedHosp && (
           <div className="bg-white rounded-xl border-2 border-dashed border-slate-300 p-12 text-center">
-            <div className="text-4xl mb-3">🏥</div>
             <div className="text-slate-600 font-medium text-lg">Select a hospital to begin modeling</div>
             <div className="text-slate-400 text-sm mt-1">{hospitals.length} critical access hospitals available in the {selectedState === 'All' ? '5-state region' : selectedState} dataset.</div>
           </div>
@@ -1232,7 +1399,7 @@ function App() {
             <div className="col-span-8">
 
               {/* Panel 1: Hospital Snapshot */}
-              <Section title="Hospital Profile" icon="🏥">
+              <Section title="Hospital Profile">
                 <div className="flex items-start justify-between mb-3">
                   <div>
                     <h2 className="text-xl font-bold text-navy">{selectedHosp.Hospital_Name}</h2>
@@ -1271,12 +1438,12 @@ function App() {
               </Section>
 
               {/* Panel 3: Projections */}
-              <Section title="Financial Projections" icon="📊">
+              <Section title="Financial Projections">
                 <ProjectionTable years={projYearList} assumptions={assumptions} hosp={selectedHosp}/>
               </Section>
 
               {/* Panel 5: Charts */}
-              <Section title="Visualizations" icon="📈">
+              <Section title="Visualizations">
                 <div className="grid grid-cols-2 gap-4">
                   <BarChart proj={primaryProj} hosp={selectedHosp}/>
                   <WaterfallChart proj={primaryProj}/>
@@ -1284,7 +1451,7 @@ function App() {
               </Section>
 
               {/* Panel 6: Scenario Comparison */}
-              <Section title="Scenario Comparison" icon="🔀" defaultOpen={false}>
+              <Section title="Scenario Comparison" defaultOpen={false}>
                 <ScenarioPanel hosp={selectedHosp} assumptions={assumptions} convYear={conversionYear}/>
               </Section>
 
@@ -1294,11 +1461,25 @@ function App() {
             <div className="col-span-4">
 
               {/* Panel 4: Viability */}
-              <Section title="Viability Assessment" icon="✅">
-                <div className="text-center mb-4">
-                  <ViabilityBadge v={viability}/>
+              <Section title="Viability Assessment">
+                <div className="mb-4">
+                  <div className="grid grid-cols-2 gap-3 mb-3">
+                    <div className="text-center">
+                      <div className="text-xs font-semibold text-slate-500 mb-1">Federal Track</div>
+                      <ViabilityBadge v={viability}/>
+                      <div className="text-xs text-slate-400 mt-1">AFP + OPPS only</div>
+                    </div>
+                    <div className="text-center">
+                      <div className="text-xs font-semibold text-slate-500 mb-1">Adjusted Track</div>
+                      <ViabilityBadge v={viabilityAdj}/>
+                      <div className="text-xs text-slate-400 mt-1">+ state supplements &amp; grants</div>
+                    </div>
+                  </div>
+                  <div className="text-xs text-center text-slate-400 px-2 mb-3">
+                    Tracks are identical when supplement inputs = $0. Enter actual figures above to see state-corrected viability.
+                  </div>
                   {primaryProj && (
-                    <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
+                    <div className="grid grid-cols-2 gap-2 text-sm">
                       <InfoCard label="Proj Net Income (Yr 1)" value={fmt(primaryProj.projNetIncome)}
                         color={primaryProj.projNetIncome>=0?'text-green-700':'text-red-600'}/>
                       <InfoCard label="Margin Improvement"     value={fmtPctSign(primaryProj.marginImprove)}
@@ -1306,11 +1487,11 @@ function App() {
                     </div>
                   )}
                 </div>
-                <RiskFlags hosp={selectedHosp} assumptions={assumptions}/>
+                <RiskFlags hosp={selectedHosp} assumptions={assumptions} proj={primaryProj}/>
               </Section>
 
               {/* Panel 2a: Revenue Assumptions */}
-              <Section title="Revenue Assumptions" icon="💰" defaultOpen={true}>
+              <Section title="Revenue Assumptions" defaultOpen={true}>
                 <CurrencyInput label="AFP Monthly (2025)" value={afpMonthly2025} onChange={setAfpMonthly2025}
                   hint="CMS OPPS Final Rule (post-sequestration)"/>
                 <CurrencyInput label="AFP Monthly (2026)" value={afpMonthly2026} onChange={setAfpMonthly2026}
@@ -1323,8 +1504,73 @@ function App() {
                   min={0} max={10} hint="OP revenue forfeiture for 340B-enrolled facilities upon conversion"/>
               </Section>
 
+              {/* Panel 2a-2: State Supplements & Grants */}
+              <Section title="State Supplements and Grants" defaultOpen={true}>
+                <div className="text-xs font-semibold text-slate-600 mb-1">State Supplement Losses</div>
+                <div className="text-xs text-slate-400 mb-3">All default $0 — enter actual figures from hospital's cost report or state filings. REH conversion forfeits inpatient-dependent supplements.</div>
+
+                <CurrencyInput label="DSH Annual Payment (all states)" value={dshAnnualLoss} onChange={setDshAnnualLoss}
+                  hint="Federal DSH statute: complete forfeiture post-REH. Enter total DSH received annually."/>
+
+                {selectedHosp?.State === 'LA' && (
+                  <CurrencyInput label="LA LINCC Payment" value={laLincLoss} onChange={setLaLincLoss}
+                    hint="Low Income and Needy Care Collaboration. High risk of full forfeiture — REH drops inpatient + obstetrical mandate."/>
+                )}
+
+                {selectedHosp?.State === 'TX' && (
+                  <div>
+                    <CurrencyInput label="TX UC Pool — Historical Annual Draw" value={txUcPoolHistorical} onChange={setTxUcPoolHistorical}
+                      hint="REH retains UC eligibility but loses inpatient charity cost base. Loss scaled by inpatient cost share automatically."/>
+                    <CurrencyInput label="TX CHIRP — Historical Annual Payment" value={txChirpHistorical} onChange={setTxChirpHistorical}
+                      hint="Inpatient tranche permanently forfeited. Outpatient tranche survives. Loss scaled by inpatient cost share automatically."/>
+                  </div>
+                )}
+
+                {primaryProj && (
+                  <div className={`text-xs font-medium mb-3 ${primaryProj.totalSuppLoss > 0 ? 'text-red-600' : 'text-slate-400'}`}>
+                    Estimated annual supplement loss: {fmt(primaryProj.totalSuppLoss)}
+                  </div>
+                )}
+
+                <div className="text-xs font-semibold text-slate-600 mb-1 mt-2">Grant Upside (Competitive — Probability-Weighted)</div>
+                <div className="text-xs text-slate-400 mb-3">These are competitive grant programs. Use 0% unless actively pursuing an application. Expected value = probability x estimated award.</div>
+
+                {selectedHosp && ['TX','AR','OK','NM'].includes(selectedHosp.State) && (
+                  <div>
+                    <PctInput label="RHTP Win Probability" value={rhtpProbability} onChange={setRhtpProbability}
+                      min={0} max={100}
+                      hint="Rural Health Transformation Program. REHs explicitly eligible. Competitive RFA; TX $281M, AR $208M, OK $223M, NM $211M allocations."/>
+                    <CurrencyInput label="RHTP Estimated Award Amount" value={rhtpAwardAmt} onChange={setRhtpAwardAmt}
+                      hint="Expected grant size if awarded. No defensible per-hospital formula — enter your estimated application amount."/>
+                  </div>
+                )}
+
+                {selectedHosp?.State === 'NM' && (
+                  <div>
+                    <PctInput label="NM RHCDF Win Probability" value={nmRhcdfProbability} onChange={setNmRhcdfProbability}
+                      min={0} max={100}
+                      hint="Rural Health Care Delivery Fund. REH conversion qualifies as new/expanded services — directly triggered by conversion."/>
+                    <CurrencyInput label="NM RHCDF Estimated Award" value={nmRhcdfAwardAmt} onChange={setNmRhcdfAwardAmt}
+                      hint="Reference: FY24-26 cycle avg ~$640K/yr annualized ($80M divided by 50 orgs over 30 months)."/>
+                  </div>
+                )}
+
+                {primaryProj && (
+                  <div className={`text-xs font-medium mb-2 ${primaryProj.totalGrantUpside > 0 ? 'text-green-600' : 'text-slate-400'}`}>
+                    Expected grant upside: {fmt(primaryProj.totalGrantUpside)}
+                  </div>
+                )}
+
+                {selectedHosp?.State === 'AR' && (
+                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-xs text-blue-700 mt-2">
+                    <div className="font-semibold">Arkansas SPA Upside (unquantified)</div>
+                    <div className="mt-1 opacity-80">AR Medicaid State Plan Amendment guarantees REHs 100% cost settlement on outpatient Medicaid services. This partially offsets DSH losses. Not modeled — requires Medicaid-specific cost report data.</div>
+                  </div>
+                )}
+              </Section>
+
               {/* Panel 2b: Cost Model */}
-              <Section title="Cost Model" icon="🔧" defaultOpen={true}>
+              <Section title="Cost Model" defaultOpen={true}>
                 <div className="mb-3 bg-blue-50 rounded p-2 text-xs text-blue-700">
                   <strong>Simple (MedPAC 40%):</strong> Uses MedPAC Chapter 7 econometric finding that 40% of inpatient costs are variable (nursing, dietary, supplies, pharma). Remaining 60% = fixed overhead absorbed by AFP.<br/><br/>
                   <strong>Detailed (Itemized):</strong> Uses staffing calculator + non-labor variable cost input. Replaces MedPAC % — does not add on top.
@@ -1339,13 +1585,13 @@ function App() {
               </Section>
 
               {/* Panel 2c: Staffing */}
-              <Section title="Staffing Cost Savings" icon="👥" defaultOpen={true}>
+              <Section title="Staffing Cost Savings" defaultOpen={true}>
                 <StaffingCalculator rows={staffingRows} onChange={setStaffingRows}
                   multiplier={benefitsMultiplier} onMultiplierChange={setBenefitsMultiplier}/>
               </Section>
 
               {/* Panel 2d: Swing Beds */}
-              <Section title="Swing Bed Revenue Loss" icon="🛏️" defaultOpen={false}>
+              <Section title="Swing Bed Revenue Loss" defaultOpen={false}>
                 <div className="mb-3 bg-amber-50 border border-amber-200 rounded p-2 text-xs text-amber-800">
                   CAH swing beds generate net margin well above marginal cost ($265/day vs $1,300–$1,800/day payment). REHs <strong>cannot</strong> operate swing beds. Enter swing bed days from the hospital's cost report.
                 </div>
@@ -1367,7 +1613,7 @@ function App() {
               </Section>
 
               {/* Panel 2e: Projection Settings */}
-              <Section title="Projection Settings" icon="⚙️" defaultOpen={false}>
+              <Section title="Projection Settings" defaultOpen={false}>
                 <div className="input-group">
                   <label>Projection Years</label>
                   <select value={projYears} onChange={e=>setProjYears(parseInt(e.target.value))}>
@@ -1384,9 +1630,9 @@ function App() {
 
               {/* PDF Button */}
               <button
-                onClick={()=>generatePDF(selectedHosp, allProjections, assumptions, viability, staffingRows)}
+                onClick={()=>generatePDF(selectedHosp, allProjections, assumptions, viability, viabilityAdj, staffingRows)}
                 className="w-full bg-navy hover:bg-blue-900 text-white font-bold py-3 rounded-lg text-sm flex items-center justify-center gap-2 no-print mt-2">
-                📄 Generate Board Report (PDF)
+                Generate Board Report (PDF)
               </button>
             </div>
           </div>
