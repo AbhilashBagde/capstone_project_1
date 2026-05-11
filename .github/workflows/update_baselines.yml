@@ -7,6 +7,7 @@ on:
       - 'SST_v6.csv'
       - 'generate_baselines.py'
       - 'build_sst.py'
+      - 'requirements.txt'
   workflow_dispatch:
 
 jobs:
@@ -24,9 +25,10 @@ jobs:
         with:
           python-version: '3.11'
           cache: 'pip'
+          cache-dependency-path: 'requirements.txt'
 
       - name: Install dependencies
-        run: pip install pandas numpy
+        run: pip install -r requirements.txt
 
       - name: Validate SST_v6.csv schema
         run: python3 build_sst.py --validate-only --out SST_v6.csv
