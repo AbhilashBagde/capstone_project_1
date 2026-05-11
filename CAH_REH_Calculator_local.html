@@ -1523,7 +1523,7 @@ function App() {
       <div className="text-center">
         <div className="w-12 h-12 border-4 border-teal-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"/>
         <div className="text-slate-700 font-medium">Loading hospital data...</div>
-        <div className="text-slate-400 text-sm mt-1">Fetching hospital baseline data from GitHub...</div>
+        <div className="text-slate-400 text-sm mt-1">Loading baseline JSON from local file</div>
       </div>
     </div>
   );
@@ -1554,7 +1554,7 @@ function App() {
           </div>
           {error && (
             <div className="mt-2 bg-amber-900/50 border border-amber-700 rounded p-2 text-amber-200 text-xs">
-              ⚠️ Could not fetch data from GitHub: {error}. Upload SST_v6.csv manually above.
+              Could not load local JSON file: {error}. Upload SST_v6.csv manually above.
             </div>
           )}
         </div>

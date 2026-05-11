@@ -24,3 +24,14 @@ Thumbs.db
 .env
 .env.local
 .env.*.local
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Raw/intermediate data files (not the final SST_v6.csv)
+SST_v4.csv
+SST_raw.csv
+df_unique_sorted.csv
+updated_df_road_dist.csv

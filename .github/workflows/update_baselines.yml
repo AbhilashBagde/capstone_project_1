@@ -1,0 +1,48 @@
+name: Update CAH_REH_Baselines
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'SST_v6.csv'
+      - 'generate_baselines.py'
+      - 'build_sst.py'
+  workflow_dispatch:
+
+jobs:
+  update-baselines:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install pandas numpy
+
+      - name: Validate SST_v6.csv schema
+        run: python3 build_sst.py --validate-only --out SST_v6.csv
+
+      - name: Regenerate CAH_REH_Baselines.json
+        run: python3 generate_baselines.py
+
+      - name: Commit and push updated baselines
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add CAH_REH_Baselines.json
+          if git diff --cached --quiet; then
+            echo "No changes to CAH_REH_Baselines.json — skipping commit."
+          else
+            DATE=$(date -u '+%Y-%m-%d')
+            git commit -m "chore: update CAH_REH_Baselines.json from pipeline run ${DATE} [skip ci]"
+            git push
+          fi
